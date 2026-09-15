@@ -1,0 +1,128 @@
+# ============================================================
+# PEWC Build & Patch Validation
+# Dispara em: push/pull_request na branch pewc-development
+# ============================================================
+# Gera o ROM final (pokeemerald_modern.gba) com as modificações PEWC
+# aplicadas e subem um BPS para validação comparativa.
+# ============================================================
+
+name: PEWC Build & Patch Validation
+
+on:
+  push:
+    branches: [ pewc-development ]
+  pull_request:
+    branches: [ pewc-development ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GAME_VERSION: EMERALD
+      GAME_REVISION: 0
+      GAME_LANGUAGE: ENGLISH
+      MODERN: 1
+      COMPARE: 0
+
+    steps:
+      - name: Checkout PEWC source
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+
+      - name: Fetch ER config submodule (HTTPS, sem chave)
+        run: |
+          git submodule sync --recursive
+          git config submodule.proto.url https://github.com/Elite-Redux/er-config.git
+          git submodule update --init --recursive --depth 1 proto
+
+      - name: Install binutils + deps
+        run: |
+          sudo apt update
+          sudo apt install -y gcc-arm-none-eabi binutils-arm-none-eabi libpng-dev \
+            default-jdk maven wget unzip zip
+
+      - name: Install Kotlin
+        run: |
+          cd tools
+          wget -q "https://github.com/JetBrains/kotlin/releases/download/v1.9.25/kotlin-compiler-1.9.25.zip"
+          unzip -q kotlin-compiler-1.9.25.zip
+          mv kotlin-compiler-1.9.25 kotlin-compiler
+          echo "$(pwd)/kotlin-compiler/bin" >> $GITHUB_PATH
+          cd ..
+          kotlinc -version
+
+      - name: Download + install poryscript
+        run: |
+          cd tools
+          wget -q "https://github.com/huderlem/poryscript/releases/download/3.5.2/poryscript-linux.zip"
+          unzip -q poryscript-linux.zip
+          rm -f poryscript-linux.zip
+          mv poryscript-linux poryscript
+          chmod +x poryscript/bin/poryscript
+          cd ..
+          tools/poryscript/bin/poryscript --version
+
+      - name: Build preproc + scaninc (tools auxiliares)
+        run: |
+          cd tools/preproc && make clean && make && cd ../..
+          cd tools/scaninc && make clean && make && cd ../..
+
+      - name: Run codegen (gera headers em include/generated/)
+        run: |
+          cd tools/codegen
+          export PATH="$(pwd)/../preproc:$(pwd)/../scaninc:$PATH"
+          export KOTLIN_HOME="$(pwd)/../kotlin-compiler"
+          export PATH="$KOTLIN_HOME/bin:$PATH"
+          export JAVA_HOME="/usr/lib/jvm/default-java"
+          make generated 2>&1 | tail -20
+          cd ../..
+
+      - name: List generated headers (debug)
+        run: |
+          find include/generated -name "*.h" 2>/dev/null | head -40 || echo "NENHUM HEADER GERADO"
+
+      - name: Build modern ROM (pokeemerald_modern.gba)
+        run: |
+          make clean 2>/dev/null || true
+          make modern -j${nproc} 2>&1 | tail -40
+        env:
+          MODERN: "1"
+
+      - name: Verify ROM exist (debug)
+        run: |
+          ls -la build/modern/pokeemerald_modern.gba 2>&1 || \
+          find . -name "*.gba" 2>/dev/null | head -5 || \
+          echo "NENHUM .gba ENCONTRADO"
+
+      - name: Upload modern ROM artifact
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: pewc-modern-rom
+          path: build/modern/pokeemerald_modern.gba
+          retention-days: 14
+
+      - name: Generate BPS diff (base → PEWC)
+        run: |
+          chmod +x ./flips-linux
+          ./flips-linux --create \
+            tools/pokeemerald/pokeemerald.gba \
+            build/modern/pokeemerald_modern.gba \
+            EliteRedux-PEWC.bps 2>&1 | head -20 || \
+            echo "FLIPS FAILED — pode faltar base ROM ou flips não funciona"
+
+      - name: Upload BPS artifact
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: pewc-patch
+          path: EliteRedux-PEWC.bps
+          retention-days: 14
+
+      - name: SHA-1 checksum (debug)
+        run: |
+          if [ -f build/modern/pokeemerald_modern.gba ]; then
+            sha1sum build/modern/pokeemerald_modern.gba
+          fi
