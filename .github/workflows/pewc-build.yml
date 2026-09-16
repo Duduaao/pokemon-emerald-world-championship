@@ -33,96 +33,191 @@ jobs:
 
       - name: Fetch ER config submodule (HTTPS, sem chave)
         run: |
+          set -x
           git submodule sync --recursive
           git config submodule.proto.url https://github.com/Elite-Redux/er-config.git
           git submodule update --init --recursive --depth 1 proto
+          echo "=== proto/ after fetch ==="
+          ls -la proto/ | head -10
 
       - name: Install binutils + deps
         run: |
+          set -x
           sudo apt update
           sudo apt install -y gcc-arm-none-eabi binutils-arm-none-eabi libpng-dev \
             default-jdk maven wget unzip zip
+          echo "=== Java check ==="
+          java -version
+          echo "JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))" >> $GITHUB_ENV
+          echo "=== JAVA_HOME set to: ${JAVA_HOME} ==="
 
       - name: Install Kotlin
         run: |
+          set -x
           cd tools
-          wget -q "https://github.com/JetBrains/kotlin/releases/download/v1.9.25/kotlin-compiler-1.9.25.zip"
-          unzip -q kotlin-compiler-1.9.25.zip
-          mv kotlin-compiler-1.9.25 kotlin-compiler
+          if [ -d "kotlin-compiler" ] && [ -f "kotlin-compiler/bin/kotlinc" ]; then
+            echo "Kotlin compiler already present, skipping download"
+          else
+            rm -rf kotlin-compiler kotlin-compiler.zip kotlin-compiler-*-bin.zip 2>/dev/null || true
+            echo "Downloading Kotlin compiler..."
+            curl -L --retry 3 --retry-delay 5 --retry-all-errors \
+              -o kotlin-compiler.zip \
+              "https://github.com/JetBrains/kotlin/releases/download/v1.9.25/kotlin-compiler-1.9.25.zip"
+            echo "Download exit: $?"
+            ls -la kotlin-compiler.zip
+            file kotlin-compiler.zip
+            echo "Unzipping..."
+            unzip -q kotlin-compiler.zip
+            echo "Unzip exit: $?"
+            rm -f kotlin-compiler.zip
+            if [ -d "kotlin-compiler-1.9.25" ]; then
+              mv kotlin-compiler-1.9.25 kotlin-compiler
+            elif [ -d "kotlinc" ]; then
+              mv kotlinc kotlin-compiler
+            else
+              echo "ERROR: Kotlin compiler directory not found after unzip"
+              ls -la
+              exit 1
+            fi
+          fi
+          echo "KOTLIN_HOME=$(pwd)/kotlin-compiler" >> $GITHUB_ENV
           echo "$(pwd)/kotlin-compiler/bin" >> $GITHUB_PATH
           cd ..
+          echo "=== Kotlin version ==="
           kotlinc -version
 
       - name: Download + install poryscript
         run: |
+          set -x
           cd tools
-          wget -q "https://github.com/huderlem/poryscript/releases/download/3.5.2/poryscript-linux.zip"
-          unzip -q poryscript-linux.zip
-          rm -f poryscript-linux.zip
-          mv poryscript-linux poryscript
+          if [ -d "poryscript" ] && [ -x "poryscript/bin/poryscript" ]; then
+            echo "Poryscript already present, skipping download"
+          else
+            rm -rf poryscript poryscript-linux.zip poryscript-linux 2>/dev/null || true
+            echo "Downloading poryscript..."
+            curl -L --retry 3 --retry-delay 5 --retry-all-errors \
+              -o poryscript-linux.zip \
+              "https://github.com/huderlem/poryscript/releases/download/3.5.2/poryscript-linux.zip"
+            echo "Download exit: $?"
+            ls -la poryscript-linux.zip
+            file poryscript-linux.zip
+            echo "Unzipping..."
+            unzip -q poryscript-linux.zip
+            echo "Unzip exit: $?"
+            rm -f poryscript-linux.zip
+            if [ -d "poryscript-linux" ]; then
+              mv poryscript-linux poryscript
+            elif [ -d "poryscript" ]; then
+              echo "poryscript directory already exists"
+            else
+              echo "ERROR: poryscript directory not found after unzip"
+              ls -la
+              exit 1
+            fi
+          fi
           chmod +x poryscript/bin/poryscript
           cd ..
+          echo "=== Poryscript version ==="
           tools/poryscript/bin/poryscript --version
 
       - name: Build preproc + scaninc (tools auxiliares)
         run: |
+          set -x
           cd tools/preproc && make clean && make && cd ../..
           cd tools/scaninc && make clean && make && cd ../..
 
       - name: Run codegen (gera headers em include/generated/)
         run: |
+          set -x
           cd tools/codegen
-          export PATH="$(pwd)/../preproc:$(pwd)/../scaninc:$PATH"
-          export KOTLIN_HOME="$(pwd)/../kotlin-compiler"
-          export PATH="$KOTLIN_HOME/bin:$PATH"
-          export JAVA_HOME="/usr/lib/jvm/default-java"
-          make generated 2>&1 | tail -20
+          export KOTLIN_HOME="${{ env.KOTLIN_HOME }}"
+          export PATH="${{ env.KOTLIN_HOME }}/bin:$PATH"
+          export JAVA_HOME="${{ env.JAVA_HOME }}"
+          echo "KOTLIN_HOME=$KOTLIN_HOME"
+          echo "JAVA_HOME=$JAVA_HOME"
+          echo "PATH contains kotlin: $(which kotlinc || echo 'NOT FOUND')"
+          kotlinc -version
+          make generated 2>&1 | tail -30
+          echo "=== generated headers ==="
+          find ../.. -path "*/include/generated/*" -name "*.h" 2>/dev/null | head -40 || echo "NENHUM HEADER GERADO"
           cd ../..
 
-      - name: List generated headers (debug)
+      - name: List all generated files (debug)
         run: |
-          find include/generated -name "*.h" 2>/dev/null | head -40 || echo "NENHUM HEADER GERADO"
+          set -x
+          echo "=== include/generated tree ==="
+          find include/generated -type f 2>/dev/null | head -60 || echo "DIR INEXISTENTE"
+          echo "=== build dir ==="
+          ls -la build/ 2>/dev/null || echo "NO BUILD DIR"
 
       - name: Build modern ROM (pokeemerald_modern.gba)
         run: |
+          set -x
           make clean 2>/dev/null || true
-          make modern -j${nproc} 2>&1 | tail -40
-        env:
-          MODERN: "1"
+          make modern -j${nproc} 2>&1 | tail -50
 
-      - name: Verify ROM exist (debug)
+      - name: Verify ROM exist
         run: |
-          ls -la build/modern/pokeemerald_modern.gba 2>&1 || \
-          find . -name "*.gba" 2>/dev/null | head -5 || \
-          echo "NENHUM .gba ENCONTRADO"
+          set -x
+          if [ -f build/modern/pokeemerald_modern.gba ]; then
+            echo "=== ROM FOUND ==="
+            ls -la build/modern/pokeemerald_modern.gba
+            file build/modern/pokeemerald_modern.gba
+          else
+            echo "=== ROM NOT FOUND, searching ==="
+            find . -name "*.gba" -type f 2>/dev/null | head -10
+            echo "=== build dir contents ==="
+            find build -type f 2>/dev/null | head -20 || echo "NO BUILD DIR"
+          fi
 
       - name: Upload modern ROM artifact
-        uses: actions/upload-artifact@v6
         if: always()
+        uses: actions/upload-artifact@v6
         with:
           name: pewc-modern-rom
-          path: build/modern/pokeemerald_modern.gba
+          path: |
+            build/modern/pokeemerald_modern.gba
+            build/**/*.gba
           retention-days: 14
 
-      - name: Generate BPS diff (base → PEWC)
+      - name: Generate BPS diff (base -> PEWC)
         run: |
-          chmod +x ./flips-linux
-          ./flips-linux --create \
-            tools/pokeemerald/pokeemerald.gba \
-            build/modern/pokeemerald_modern.gba \
-            EliteRedux-PEWC.bps 2>&1 | head -20 || \
-            echo "FLIPS FAILED — pode faltar base ROM ou flips não funciona"
+          set -x
+          if [ ! -f tools/pokeemerald/pokeemerald.gba ]; then
+            echo "BASE ROM NOT FOUND: tools/pokeemerald/pokeemerald.gba"
+            echo "BPS generation skipped"
+            exit 0
+          fi
+          if [ ! -f build/modern/pokeemerald_modern.gba ]; then
+            echo "MODERN ROM NOT FOUND: build/modern/pokeemerald_modern.gba"
+            echo "BPS generation skipped"
+            exit 0
+          fi
+          chmod +x ./flips-linux 2>/dev/null || true
+          if [ -x ./flips-linux ]; then
+            ./flips-linux --create \
+              tools/pokeemerald/pokeemerald.gba \
+              build/modern/pokeemerald_modern.gba \
+              EliteRedux-PEWC.bps 2>&1 | head -30
+          else
+            echo "flips-linux not found or not executable, skipping BPS"
+          fi
 
       - name: Upload BPS artifact
-        uses: actions/upload-artifact@v6
         if: always()
+        uses: actions/upload-artifact@v6
         with:
           name: pewc-patch
-          path: EliteRedux-PEWC.bps
+          path: |
+            EliteRedux-PEWC.bps
           retention-days: 14
 
-      - name: SHA-1 checksum (debug)
+      - name: SHA-1 checksum
+        if: always()
         run: |
+          set -x
           if [ -f build/modern/pokeemerald_modern.gba ]; then
             sha1sum build/modern/pokeemerald_modern.gba
+          else
+            echo "No ROM to checksum"
           fi
